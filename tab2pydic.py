@@ -1,341 +1,155 @@
-#    go-binsize-viz, Go executable vizualisation
-#    Copyright (C) 2018-2022 Raphael 'kena' Poss
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU Affero General Public License as published
-#    by the Free Software Foundation, either version 3 of the License, or
-#    (at your option) any later version.
-#
-#    This program is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU Affero General Public License for more details.
-#
-#    You should have received a copy of the GNU Affero General Public License
-#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-#
-import re
 import sys
+from typing import BinaryIO
+from re_set import *
 
-undefre = re.compile(r'^\s*0\s+U\s+',re.A)
-entriesre = re.compile(r'^\s*([0-9a-fA-F]+)\s+([0-9]+)\s+(\S+)\s+(.*)$',re.A)
+def process(file: BinaryIO):
+    vtables_sz = 0
+    typeinfo_sz = 0
+    init_sz = 0
+    rest_sz = 0
+    gotyp_sz = 0
 
-tmplpart = r'''
-<
- (?:
-    [^<>]
-  | (?:
-     <
-      (?:
-        [^<>]
-      | (?:
-          <
-            (?:
-              [^<>]
-            | (?:
-                <
-                  (?:
-                    [^<>]
-                  | (?:
-                      <
-                        (?:
-                          [^<>]
-                        | (?:
-                            <
-                              (?:
-                                [^<>]
-                              | (?:
-                                  <
-                                    (?:
-                                      [^<>]
-                                    | (?:
-                                        <
-                                          (?:
-                                            [^<>]
-                                          | (?:
-                                              <
-                                                [^<>]*
-                                              >
-                                            )
-                                          )*
-                                        >
-                                      )
-                                    )*
-                                  >
-                                )
-                              )*
-                            >
-                          )
-                        )*
-                      >
-                    )
-                  )*
-                >
-              )
-            )*
-          >
-        )
-      )*
-     >
-    )
- )*
->
-'''
-parengroup = tmplpart.replace("<", r'\(').replace(">", r'\)')
+    values = {}
 
-#print("WOO", parengroup)
+    def store_rec(values, path, sz):
+        if len(path) == 0:
+            v = values.get("value", 0)
+            v += sz
+            values["value"] = v
+        else:
+            n = path[0]
+            d1 = values.get("children", {})
+            d = d1.get(n, {})
+            d1[n] = d
+            values["children"] = d1
+            store_rec(d, path[1:], sz)
 
-cpppath = '''
-     (?:
-        \([^)]*\)                   # (anonymous namespace)
-      | \{[^}]*\}                   # {lambda ...}
-      | ~?                          # maybe ~destructor
-        (?:
-           \$?\w+                      # name
-         | operator(?:[^\(]+|\(\))  # special name
-        )
-        (?:'''+tmplpart+''')?       # maybe <tmpl params>
-        (?:'''+parengroup+''')?     # maybe function args
-        (?:\sconst)?                # maybe " const"
-     )::
-  | [a-zA-Z]+_
-'''
+    def store(path, sz):
+        nonlocal values
+        store_rec(values, path, sz)
 
-cpppathre = re.compile(cpppath, re.X|re.A)
+    with open(sys.argv[1]) as f:
+        for line in f:
+            if undefined_re.match(line) is not None:
+                
+                continue
+            if line.endswith('\n'):
+                line = line[:-1]
 
-cppsymre = re.compile(r'''
-^
-# prefix
-(?:guard\svariable\sfor\s)?
-(
-  # type
-  (?:
-    (?:
-       \w
-     | ::
-     | -
-     | \*
-     | \&
-     | (?:'''+tmplpart+''')
-    )+
-    \s
-  )*
-)
-(
-  # path / namespace
-  (?:'''+cpppath+''')*
-)
-(
-  \{[^}]*\}                   # {lambda ...}
-|
-  # object name
-  ~?                          # maybe destructor
-  (?:
-     \$?\w+                      # name
-   | operator(?:[^\(]+|\(\))  # special name
-   | \._\d+                   # ._NNN
-  )
-  (?:\[[^][]*\])?              # ABI spec
-  (?:'''+tmplpart+''')?       # maybe <tmpl params>
-  (?:'''+parengroup+'''
-      (?:\sconst)?                # maybe " const"
-      (?:\s\[.*\])?               # maybe words
-      (?:\s\(
-          (?:\.(?:constprop|part|isra).\d+)+
-      \))?    # maybe (.constprop.NNN)
-  )?
-  (?:\*+)?                    # maybe ptr
-)
-$
-''', re.X|re.A)
+            m = entries_re.match(line)
+            if m is None:
+                continue
 
-gopathparts = r'''
-    \(
-      (?:
-         [^()]
-       | \( [^()]* \)
-      )*
-    \)\.                  # (*Foo)., (*struct{... () }).
-  | struct\s\{
-     (?:
-        [^{}]
-      | \{[^{}]*\}
-     )*
-    \}\.                  # struct { ... }.
-  | \$?(?:\w|-|%)+\.      # fun.
-  | glob\.\.              # glob..
-  | \.gobytes\.           # .gobytes.
-  | \.dict\.              # .dict.
-  | (?:\w|\.|-|%)+/       # path/
-'''
+            typ = m.group(3).strip()
+            if typ == 'U':
+                
+                continue
 
-gopathpartsre = re.compile(gopathparts, re.X|re.A)
+            sz = m.group(2).strip()
+            try:
+                sz = int(sz)
+            except:
+                continue
+            if sz == 0:
+                
+                continue
 
-#print("WOO", gopathpartsre.findall("runtime.LockOSThread"), file=sys.stderr)
+            sym = m.group(4).strip()
+            if sym == '':
+                continue
+            if sym.startswith('construction vtable ') or sym.startswith('vtable for '):
+                
+                vtables_sz += sz
+                continue
+            if sym.startswith('__static_initialization_and_destruction'):
+                
+                init_sz += sz
+                continue
+            if sym.startswith('typeinfo '):
+                
+                typeinfo_sz += sz
+                continue
+            if sym.startswith('type:'):
+                
+                gotyp_sz += sz
+                continue
 
-
-golastpart = r'''
-      (?:
-        (?:
-            \.?
-            (?:
-               (?:\w|-|%)+    # regular name
-               (?:\[[^\]+]\])?          # optional template params
-             | \( [^()]* \)   # v1.x go 
-            )
-            (?:-fm)?)  # name
-      | struct\s\{
-           (?:
-              [^{}]
-            | \{[^{}]*\}
-           )*
-          \}                    # struct { ... }
-      )
-      (?:,
-         (?:
-          (?:(?:\w|\.|-|%)+/)*
-          (?:\w|-|%|\.)+
-          | interface\s\{ (?: [^{}] | \{ [^{}]* \} )* \}
-         )
-      )?    # opt ,xxx interface suffix
-    | initdone\.
-    | initdone·
-'''
-
-golastpartre = re.compile('('+golastpart + ')$', re.X|re.A)
-#print("WOO", golastpartre.findall("runtime.LockOSThread"), file=sys.stderr)
-#print("WOO", golastpartre.findall("go.itab.*archive/zip.countWriter,io.Writer"), file=sys.stderr)
-
-gosymre = re.compile(r'''
-^
-  (
-    (?:go\.itab\.\*?)?
-  )
-  (
-    (?:'''+gopathparts+''')*
-  )
-  (
-    '''+golastpart+'''
-  )
-$
-''', re.X|re.A)
-
-#print("WOO", gosymre.match("runtime.LockOSThread").groups(), file=sys.stderr)
-
-vtables_sz = 0
-typeinfo_sz = 0
-init_sz = 0
-rest_sz = 0
-gotyp_sz = 0
-
-values = {}
-
-def store_rec(values, path, sz):
-    if len(path) == 0:
-        v = values.get("value", 0)
-        v += sz
-        values["value"] = v
-    else:
-        n = path[0]
-        d1 = values.get("children", {})
-        d = d1.get(n, {})
-        d1[n] = d
-        values["children"] = d1
-        store_rec(d, path[1:], sz)
-
-def store(path, sz):
-    global values
-    store_rec(values, path, sz)
-
-c = 0
-with open(sys.argv[1]) as f:
-    for line in f:
-        if undefre.match(line) is not None:
-            # undefined (external) symbol, skip
-            continue
-        if line.endswith('\n'):
-            line = line[:-1]
-
-        m = entriesre.match(line)
-        if m is None:
-            print("\nunknown format:", line, file=sys.stderr)
-            continue
-
-        typ = m.group(3).strip()
-        if typ == 'U':
-            # external object, skip
-            continue
-
-        sz = m.group(2).strip()
-        try:
-            sz = int(sz)
-        except:
-            print("\nunknown size format:", m.group(2), file=sys.stderr)
-            continue
-        if sz == 0:
-            # skip over no-size objects
-            continue
-
-        sym = m.group(4).strip()
-        if sym == '':
-            continue
-        if sym.startswith('construction vtable ') or sym.startswith('vtable for '):
-            # c++ virtual diamond constructors
-            vtables_sz += sz
-            continue
-        if sym.startswith('__static_initialization_and_destruction'):
-            # c++ static initializers
-            init_sz += sz
-            continue
-        if sym.startswith('typeinfo '):
-            # c++ type metadata
-            typeinfo_sz += sz
-            continue
-        if sym.startswith('type..'):
-            # go generated type equality and hash functions
-            gotyp_sz += sz
-            continue
-
-        parts = cppsymre.match(sym)
-        if parts is not None:
-            prefix = ['c/c++ · ']
-            partsre = cpppathre
-
-        if parts is None:
-            parts = gosymre.match(sym)
+            parts = cpp_sym_re.match(sym)
+            parts_re = None
             if parts is not None:
-                prefix = ['go · ']
-                partsre = gopathpartsre
+                prefix = ['c/c++ · ']
+                parts_re = cpp_path_re
 
-        if parts is None:
-            print("\nunknown",typ,"sym format:", sym, file=sys.stderr)
-            rest_sz += sz
-            continue
+            if parts is None:
+                parts = go_sym_re.match(sym)
+                if parts is not None:
+                    prefix = ['go · ']
+                    parts_re = go_path_parts_re
 
-        path = parts.group(2)
-        path = partsre.findall(path)
-        name = parts.group(1) + parts.group(3)
+            if parts is None:
+                rest_sz += sz
+                continue
 
-        #print(sz, "##", parts.group(2), "##", path, "##", parts.group(1), "##", parts.group(3), file=sys.stderr)
+            if not parts_re:
+                continue
 
-        fullpath = prefix+path+[name]
-        # print(sz, "##", fullpath)
+            path = parts.group(2)
+            path = parts_re.findall(path)
+            name = parts.group(1) + parts.group(3)
 
-        store(fullpath, sz)
-        
-        if c % 1000 == 0:
-            print(".", end="", file=sys.stderr)
-            sys.stderr.flush()
-        c+=1
+            
 
-store(['c/c++ · ','VTABLES'], vtables_sz)
-store(['c/c++ · ','TYPEDATA'], typeinfo_sz)
-store(['c/c++ · ','INITIALIZERS'], init_sz)
-store(['go · ','TYPEDATA'], gotyp_sz)
-store(['UNKNOWN'], rest_sz)
+            fullpath = prefix+path+[name] # type: ignore            
 
-print("\noutput...", file=sys.stderr)
 
-print(values)
-#import pprint
-#pprint.pprint(values)
+            store(fullpath, sz)
+
+    store(['c/c++ · ','VTABLES'], vtables_sz)
+    store(['c/c++ · ','TYPEDATA'], typeinfo_sz)
+    store(['c/c++ · ','INITIALIZERS'], init_sz)
+    store(['go · ','TYPEDATA'], gotyp_sz)
+    store(['UNKNOWN'], rest_sz)
+
+
+    values['name'] = '>'
+    def flatten(d):
+        vals = []
+        for k, v in d.items():
+            if isinstance(v, dict):
+                v['name'] = k
+                vals.append(v)
+        return vals
+
+    def transform(d):
+        # transform [A, B., X] into  [A, B/, _self_, X]  if [A, B/] also exists already.
+        maybecopy = None
+        for k in d:
+            if k.endswith('.'):
+                dirkey = k[:-1] + '/'
+                if dirkey in d:
+                    if maybecopy is None:
+                        maybecopy = d.copy()
+                    maybecopy[dirkey]['children']['· self'] = d[k]
+                    del(maybecopy[k])
+        if maybecopy is not None:
+            d = maybecopy
+
+        for k, v in list(d.items()):
+            if type(v) == type({}):
+                ename, v = transform(v)
+                del d[k]
+                d[k+ename] = v
+        ename = ""
+        if "children" in d:
+            c = flatten(d['children'])
+            if len(c) == 1 and "children" in c[0]:
+                c0 = c[0]
+                ename = c0["name"]
+                c = c0["children"]
+            d['children'] = c
+        return ename, d
+
+    _, values = transform(values)
+
+    return values
+
